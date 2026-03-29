@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>مراقب التطريز - خالد</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        body { font-family: 'Arial', sans-serif; background: #1a1a1a; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .card { background: #2d2d2d; padding: 30px; border-radius: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); width: 90%; max-width: 400px; text-align: center; }
+        .status { font-size: 1.8rem; padding: 15px; border-radius: 10px; margin-bottom: 20px; font-weight: bold; }
+        .START { background: #28a745; text-shadow: 0 0 10px #fff; }
+        .STOP { background: #dc3545; }
+        .PAUSE { background: #ffc107; color: black; }
+        .UNKNOWN { background: #6c757d; }
+        .info { background: #3d3d3d; padding: 15px; border-radius: 10px; margin: 10px 0; display: flex; justify-content: space-between; }
+        .label { color: #aaa; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <div id="statusBox" class="status UNKNOWN">جاري الاتصال...</div>
+    
+    <div class="info">
+        <span class="label">الخياط:</span>
+        <span id="tailor">---</span>
+    </div>
+    <div class="info">
+        <span class="label">اللون:</span>
+        <span id="color">---</span>
+    </div>
+    <div class="info">
+        <span class="label">الفيشة:</span>
+        <span id="ficha">---</span>
+    </div>
+</div>
+
+<script>
+    const socket = io(); // يتصل تلقائياً بسيرفر Render
+
+    socket.on('update_ui', (data) => {
+        const box = document.getElementById('statusBox');
+        box.innerText = "الحالة: " + data.status;
+        box.className = "status " + data.status;
+
+        if (data.details) {
+            document.getElementById('tailor').innerText = data.details.tailor || '---';
+            document.getElementById('color').innerText = data.details.color || '---';
+            document.getElementById('ficha').innerText = data.details.ficha_id || '---';
+        }
+    });
+</script>
+
+</body>
+</html>
