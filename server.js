@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-// server.js — سيرفر التطريز على Render
+// server.js — سيرفر التطريز المطور لـ Render
 // ═══════════════════════════════════════════════════════
 const express = require('express');
 const http = require('http');
@@ -10,90 +10,70 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
     cors: {
-        origin: "*",
+        origin: "*", // يسمح بالاتصال من أي مصدر (برنامج البايثون أو المتصفح)
         methods: ["GET", "POST"]
     },
-    // ★ دعم polling + websocket معاً
     transports: ['polling', 'websocket']
 });
 
-// حالة الآلة الحالية
+// متغيرات لتخزين حالة الآلة وآخر بيانات مستلمة
 let machineStatus = 'UNKNOWN';
+let lastData = {}; 
 
+// صفحة الاختبار الرئيسية (تظهر عند فتح الرابط في المتصفح)
 app.get('/', (req, res) => {
-    const clientCount = io.engine.clientsCount;
     res.json({
-        status: 'running',
-        clients: clientCount,
+        status: 'Online',
         machineStatus: machineStatus,
+        lastData: lastData,
+        clientsCount: io.engine.clientsCount,
         timestamp: new Date().toISOString()
     });
 });
 
 io.on('connection', (socket) => {
-    console.log(`✅ عميل جديد متصل: ${socket.id} | النقل: ${socket.conn.transport.name}`);
+    console.log(`✅ متصل جديد: ${socket.id}`);
 
-    // إرسال حالة الآلة الحالية للعميل الجديد
-    socket.emit('update_status', { status: machineStatus });
+    // إرسال الحالة الحالية فور دخول أي مستخدم جديد
+    socket.emit('update_status', { status: machineStatus, details: lastData });
 
     // ═══════════════════════════════════════════════
-    // ★★★ استقبال الأوامر وإعادة بثها ★★★
+    // استقبال البيانات من برنامج البايثون وإعادة بثها
     // ═══════════════════════════════════════════════
     socket.on('command', (payload) => {
-        console.log(`📨 أمر من ${socket.id}:`, JSON.stringify(payload));
+        console.log(`📨 استلام بيانات:`, payload);
 
         const action = payload.action;
 
-        // أوامر التحكم بالآلة
+        // 1. تحديث حالة التشغيل (START/STOP/PAUSE)
         if (['START', 'STOP', 'PAUSE'].includes(action)) {
             machineStatus = action;
-            console.log(`⚙️ حالة الآلة: ${machineStatus}`);
-            // ★ بث لكل العملاء بما فيهم المرسل
-            io.emit('update_status', { status: machineStatus });
         }
 
-        // تغيير بيانات (فيشة أو إنتاج)
+        // 2. معالجة بيانات الإنتاج والفيشة (data_change)
         if (action === 'data_change') {
-            console.log(`📡 تغيير بيانات: ${payload.change_type}`);
-
-            // بث للجميع ما عدا المرسل
-            socket.broadcast.emit('data_changed', {
+            lastData = payload.details; // حفظ آخر بيانات (اسم الخياط، اللون، إلخ)
+            
+            // ★ الأهم: إرسال البيانات فوراً لكل المتصفحات المتصلة ★
+            io.emit('data_changed', {
                 type: payload.change_type,
                 details: payload.details,
-                timestamp: payload.timestamp,
-                from: socket.id
-            });
-
-            // إرسال حدث خاص حسب نوع التغيير
-            if (payload.change_type === 'ficha_saved') {
-                socket.broadcast.emit('ficha_saved', payload.details);
-            } else if (payload.change_type === 'production_saved') {
-                socket.broadcast.emit('production_saved', payload.details);
-            }
-        }
-
-        // طلب تحديث
-        if (action === 'SYNC_REQUEST') {
-            console.log(`🔄 طلب تحديث من ${socket.id}`);
-            socket.emit('update_status', {
-                status: machineStatus,
-                sync: true,
+                machineStatus: machineStatus,
                 timestamp: new Date().toISOString()
             });
+        } else {
+            // في حال كانت الأوامر تشغيل/إيقاف فقط، نحدث الحالة للجميع
+            io.emit('update_status', { status: machineStatus, details: lastData });
         }
-    });
-
-    // ترقية النقل
-    socket.conn.once('upgrade', () => {
-        console.log(`⬆️ ترقية ${socket.id} إلى: ${socket.conn.transport.name}`);
     });
 
     socket.on('disconnect', (reason) => {
-        console.log(`❌ عميل انقطع: ${socket.id} | السبب: ${reason}`);
+        console.log(`❌ انقطع الاتصال: ${socket.id} | السبب: ${reason}`);
     });
 });
 
+// المنفذ الخاص بـ Render (10000 أو المنفذ الافتراضي 3000)
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`🚀 السيرفر يعمل على المنفذ ${PORT}`);
+    console.log(`🚀 السيرفر يعمل بنجاح على المنفذ ${PORT}`);
 });
