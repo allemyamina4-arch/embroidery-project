@@ -1,0 +1,25 @@
+{
+  "name": "embroidery-production-server",
+  "version": "4.0.0",
+  "description": "سيرفر نظام الإنتاج مع Buffer + ACK + مزامنة",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "socket.io": "^4.7.4"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "embroidery",
+    "production",
+    "socketio",
+    "realtime"
+  ],
+  "author": "Production System",
+  "license": "MIT"
+}
