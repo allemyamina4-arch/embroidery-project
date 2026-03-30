@@ -1,7 +1,7 @@
 {
   "name": "embroidery-production-server",
   "version": "4.0.0",
-  "description": "سيرفر نظام الإنتاج مع Buffer + ACK + مزامنة",
+  "description": "سيرفر نظام الإنتاج مع PostgreSQL + Buffer + ACK",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -9,7 +9,8 @@
   },
   "dependencies": {
     "express": "^4.18.2",
-    "socket.io": "^4.7.4"
+    "socket.io": "^4.7.4",
+    "pg": "^8.12.0"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -18,6 +19,7 @@
     "embroidery",
     "production",
     "socketio",
+    "postgresql",
     "realtime"
   ],
   "author": "Production System",
