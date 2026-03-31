@@ -18,10 +18,17 @@ const io = new Server(server, {
 // ═══════════════════════════════════════════════════════
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
+    ssl: {
+        rejectUnauthorized: false,
+    },
     max: 10,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 10000,
+});
+
+// ★ معالجة أخطاء الاتصال بشكل عام (يمنع توقف السيرفر)
+pool.on('error', (err) => {
+    console.error('⚠️ خطأ غير متوقع في اتصال PostgreSQL:', err.message);
 });
 
 // ═══════════════════════════════════════════════════════
