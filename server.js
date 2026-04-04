@@ -5,42 +5,12 @@ const path = require('path');
 const { Pool } = require('pg');
 const crypto = require('crypto');
 
-// ═══════════════════════════════════════════════════════
-// ★★★ دالة توليد UUID آمنة — 3 طرق بديلة ★★★
-// ═══════════════════════════════════════════════════════
-let uuidLib = null;
-try {
-    uuidLib = require('uuid');
-} catch (e) {
-    // مكتبة uuid غير موجودة — سنستخدم بدائل
-}
-
-function generateUUID() {
-    // الطريقة 1: مكتبة uuid
-    if (uuidLib && typeof uuidLib.v4 === 'function') {
-        return uuidLib.v4();
-    }
-    // الطريقة 2: crypto.randomUUID (Node 19+)
-    if (crypto && typeof crypto.randomUUID === 'function') {
-        return crypto.randomUUID();
-    }
-    // الطريقة 3: توليد يدوي
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
-        const r = (Math.random() * 16) | 0;
-        const v = c === 'x' ? r : (r & 0x3) | 0x8;
-        return v.toString(16);
-    });
-}
-
-// ═══════════════════════════════════════════════════════
-// ★★★ Express + Socket.IO ★★★
-// ═══════════════════════════════════════════════════════
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-    cors: { origin: '*', methods: ['GET', 'POST'] },
+    cors: { origin: "*", methods: ["GET", "POST"] },
     transports: ['polling', 'websocket'],
-    pingTimeout: 120000,
+    pingTimeout: 60000,
     pingInterval: 25000,
     maxHttpBufferSize: 5e6
 });
@@ -53,305 +23,118 @@ const pool = new Pool({
     ssl: { rejectUnauthorized: false },
     max: 10,
     idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 10000
+    connectionTimeoutMillis: 10000,
 });
 
 pool.on('error', (err) => {
-    console.error('⚠️ خطأ PostgreSQL غير متوقع:', err.message);
+    console.error('⚠️ خطأ PostgreSQL:', err.message);
 });
 
 // ═══════════════════════════════════════════════════════
-// ★★★ متغيرات الحالة ★★★
-// ═══════════════════════════════════════════════════════
-let machineStatus = 'UNKNOWN';
-let lastData = { tailor: '---', color: '---', ficha_id: '---' };
-let sequenceCounter = 0;
-let dbAvailable = false;
-
-// ★ cache أسماء الأعمدة — يُمسح بعد كل migration
-let _cachedColumns = {};
-
-// ═══════════════════════════════════════════════════════
-// ★★★ دوال Migration المساعدة ★★★
-// ═══════════════════════════════════════════════════════
-
-/**
- * ★ فحص هل عمود موجود — إذا لا → أضفه تلقائياً
- */
-async function safeAddColumn(client, table, column, definition) {
-    try {
-        const result = await client.query(
-            `SELECT column_name
-             FROM information_schema.columns
-             WHERE table_name = $1
-               AND column_name = $2`,
-            [table, column]
-        );
-
-        if (result.rows.length === 0) {
-            await client.query(
-                `ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`
-            );
-            console.log(`   ✅ تمت إضافة عمود: ${table}.${column} (${definition})`);
-        } else {
-            console.log(`   ✔️  العمود موجود: ${table}.${column}`);
-        }
-    } catch (err) {
-        if (err.message.includes('already exists')) {
-            console.log(`   ✔️  العمود موجود: ${table}.${column}`);
-        } else {
-            console.error(`   ❌ فشل إضافة ${table}.${column}: ${err.message}`);
-        }
-    }
-}
-
-/**
- * ★ إنشاء فهرس بأمان
- */
-async function safeCreateIndex(client, indexName, table, column) {
-    try {
-        await client.query(
-            `CREATE INDEX IF NOT EXISTS ${indexName} ON ${table}(${column})`
-        );
-    } catch (err) {
-        // تجاهل — الفهرس موجود
-    }
-}
-
-/**
- * ★ جلب أسماء أعمدة جدول — مع cache 60 ثانية
- */
-async function getAvailableColumns(tableName) {
-    const now = Date.now();
-    if (
-        _cachedColumns[tableName] &&
-        now - _cachedColumns[tableName].time < 60000
-    ) {
-        return _cachedColumns[tableName].columns;
-    }
-    try {
-        const result = await pool.query(
-            `SELECT column_name
-             FROM information_schema.columns
-             WHERE table_name = $1`,
-            [tableName]
-        );
-        const columns = result.rows.map((r) => r.column_name);
-        _cachedColumns[tableName] = { columns, time: now };
-        return columns;
-    } catch (e) {
-        return ['seq', 'type', 'data']; // الحد الأدنى
-    }
-}
-
-// ═══════════════════════════════════════════════════════
-// ★★★ initDatabase — إنشاء + Migration تلقائي ★★★
+// ★★★ إنشاء الجداول ★★★
 // ═══════════════════════════════════════════════════════
 async function initDatabase() {
     const client = await pool.connect();
     try {
-        console.log('═'.repeat(60));
-        console.log('🔄 بدء تهيئة قاعدة البيانات...');
-
-        // ──────────────────────────────────────────────
-        // الخطوة 1: إنشاء الجداول الأساسية
-        // ──────────────────────────────────────────────
+        // جدول الرسائل — مع UUID و Hash
         await client.query(`
             CREATE TABLE IF NOT EXISTS message_buffer (
-                id    SERIAL PRIMARY KEY,
-                seq   INTEGER UNIQUE NOT NULL,
-                uuid  VARCHAR(36),
-                type  VARCHAR(100) NOT NULL,
-                data  JSONB NOT NULL,
-                hash  VARCHAR(64),
-                sender    VARCHAR(100),
+                id SERIAL PRIMARY KEY,
+                seq INTEGER UNIQUE NOT NULL,
+                uuid VARCHAR(36) UNIQUE NOT NULL,
+                type VARCHAR(100) NOT NULL,
+                data JSONB NOT NULL,
+                hash VARCHAR(64) NOT NULL,
+                sender VARCHAR(100),
                 timestamp TIMESTAMPTZ DEFAULT NOW(),
-                acked_by  TEXT[] DEFAULT '{}'
+                acked_by TEXT[] DEFAULT '{}'
             )
         `);
 
         await client.query(`
             CREATE TABLE IF NOT EXISTS machine_state (
-                id         INTEGER PRIMARY KEY DEFAULT 1,
-                status     VARCHAR(50) DEFAULT 'UNKNOWN',
-                speed      REAL DEFAULT 0,
-                last_data  JSONB DEFAULT '{"tailor":"---","color":"---","ficha_id":"---"}',
+                id INTEGER PRIMARY KEY DEFAULT 1,
+                status VARCHAR(50) DEFAULT 'UNKNOWN',
+                speed REAL DEFAULT 0,
+                last_data JSONB DEFAULT '{"tailor":"---","color":"---","ficha_id":"---"}',
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )
         `);
 
         await client.query(`
             CREATE TABLE IF NOT EXISTS sequence_counter (
-                id          INTEGER PRIMARY KEY DEFAULT 1,
+                id INTEGER PRIMARY KEY DEFAULT 1,
                 current_seq INTEGER DEFAULT 0
             )
         `);
 
-        // ──────────────────────────────────────────────
-        // الخطوة 2: ★ Migration — إضافة أي عمود مفقود ★
-        // ──────────────────────────────────────────────
-        console.log('🔧 فحص الأعمدة وإضافة المفقود...');
+        // فهارس
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_buffer_seq ON message_buffer(seq)`);
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_buffer_uuid ON message_buffer(uuid)`);
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_buffer_timestamp ON message_buffer(timestamp)`);
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_buffer_type ON message_buffer(type)`);
 
-        await safeAddColumn(client, 'message_buffer', 'uuid',      'VARCHAR(36)');
-        await safeAddColumn(client, 'message_buffer', 'hash',      'VARCHAR(64)');
-        await safeAddColumn(client, 'message_buffer', 'sender',    'VARCHAR(100)');
-        await safeAddColumn(client, 'message_buffer', 'acked_by',  "TEXT[] DEFAULT '{}'");
-        await safeAddColumn(client, 'message_buffer', 'timestamp', 'TIMESTAMPTZ DEFAULT NOW()');
-
-        // ──────────────────────────────────────────────
-        // الخطوة 3: ملء UUID للصفوف القديمة
-        // ──────────────────────────────────────────────
-        const nullUuids = await client.query(
-            `SELECT id FROM message_buffer WHERE uuid IS NULL`
-        );
-        if (nullUuids.rows.length > 0) {
-            console.log(`🔧 ملء ${nullUuids.rows.length} صف بدون UUID...`);
-            for (const row of nullUuids.rows) {
-                await client.query(
-                    `UPDATE message_buffer SET uuid = $1 WHERE id = $2`,
-                    [generateUUID(), row.id]
-                );
-            }
-            console.log('   ✅ تم ملء UUID للصفوف القديمة');
-        }
-
-        // ──────────────────────────────────────────────
-        // الخطوة 4: ملء hash للصفوف القديمة
-        // ──────────────────────────────────────────────
-        const nullHashes = await client.query(
-            `SELECT id, data FROM message_buffer WHERE hash IS NULL`
-        );
-        if (nullHashes.rows.length > 0) {
-            console.log(`🔧 ملء ${nullHashes.rows.length} صف بدون Hash...`);
-            for (const row of nullHashes.rows) {
-                const h = computeHash(
-                    typeof row.data === 'string'
-                        ? JSON.parse(row.data)
-                        : row.data
-                );
-                await client.query(
-                    `UPDATE message_buffer SET hash = $1 WHERE id = $2`,
-                    [h, row.id]
-                );
-            }
-            console.log('   ✅ تم ملء Hash للصفوف القديمة');
-        }
-
-        // ──────────────────────────────────────────────
-        // الخطوة 5: UNIQUE index على uuid (partial)
-        // ──────────────────────────────────────────────
-        try {
-            await client.query(`
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_buffer_uuid_unique
-                ON message_buffer(uuid)
-                WHERE uuid IS NOT NULL
-            `);
-        } catch (e) {
-            console.log(`⚠️ UNIQUE index على uuid: ${e.message}`);
-        }
-
-        // ──────────────────────────────────────────────
-        // الخطوة 6: فهارس عامة
-        // ──────────────────────────────────────────────
-        await safeCreateIndex(client, 'idx_buffer_seq',       'message_buffer', 'seq');
-        await safeCreateIndex(client, 'idx_buffer_uuid',      'message_buffer', 'uuid');
-        await safeCreateIndex(client, 'idx_buffer_timestamp', 'message_buffer', 'timestamp');
-        await safeCreateIndex(client, 'idx_buffer_type',      'message_buffer', 'type');
-
-        // ──────────────────────────────────────────────
-        // الخطوة 7: بيانات ابتدائية
-        // ──────────────────────────────────────────────
         await client.query(`
             INSERT INTO machine_state (id, status, last_data)
             VALUES (1, 'UNKNOWN', '{"tailor":"---","color":"---","ficha_id":"---"}')
             ON CONFLICT (id) DO NOTHING
         `);
         await client.query(`
-            INSERT INTO sequence_counter (id, current_seq)
-            VALUES (1, 0)
+            INSERT INTO sequence_counter (id, current_seq) VALUES (1, 0)
             ON CONFLICT (id) DO NOTHING
         `);
 
-        // ──────────────────────────────────────────────
-        // الخطوة 8: تقرير نهائي
-        // ──────────────────────────────────────────────
-        const countRes = await client.query(
-            'SELECT COUNT(*) as count FROM message_buffer'
-        );
-        const seqRes = await client.query(
-            'SELECT current_seq FROM sequence_counter WHERE id=1'
-        );
-        const colsRes = await client.query(`
-            SELECT column_name, data_type
-            FROM information_schema.columns
-            WHERE table_name = 'message_buffer'
-            ORDER BY ordinal_position
-        `);
-
-        console.log('═'.repeat(60));
-        console.log('✅ قاعدة البيانات جاهزة!');
-        console.log(`   📦 رسائل مخزنة : ${countRes.rows[0].count}`);
-        console.log(`   🔢 آخر SEQ     : ${seqRes.rows[0]?.current_seq || 0}`);
-        console.log('   📋 أعمدة message_buffer:');
-        colsRes.rows.forEach((c) => {
-            console.log(`      - ${c.column_name} (${c.data_type})`);
-        });
-        console.log('═'.repeat(60));
+        console.log('✅ قاعدة البيانات PostgreSQL جاهزة');
+        const countResult = await client.query('SELECT COUNT(*) as count FROM message_buffer');
+        const seqResult = await client.query('SELECT current_seq FROM sequence_counter WHERE id=1');
+        console.log(`   📦 الرسائل المخزنة: ${countResult.rows[0].count}`);
+        console.log(`   🔢 آخر SEQ: ${seqResult.rows[0]?.current_seq || 0}`);
     } catch (err) {
-        console.error('❌ خطأ تهيئة DB:', err.message);
-        console.error('   Stack:', err.stack);
+        console.error('❌ خطأ إنشاء DB:', err.message);
     } finally {
         client.release();
     }
 }
 
 // ═══════════════════════════════════════════════════════
-// ★★★ دوال أساسية ★★★
+// ★★★ دوال قاعدة البيانات ★★★
 // ═══════════════════════════════════════════════════════
-
-function computeHash(data) {
-    try {
-        const str = JSON.stringify(data, Object.keys(data).sort());
-        return crypto.createHash('sha256').update(str, 'utf8').digest('hex');
-    } catch (e) {
-        const str = JSON.stringify(data);
-        return crypto.createHash('sha256').update(str, 'utf8').digest('hex');
-    }
-}
+let machineStatus = 'UNKNOWN';
+let lastData = { tailor: '---', color: '---', ficha_id: '---' };
+let sequenceCounter = 0;
+let dbAvailable = false;
 
 async function loadStateFromDB() {
     try {
-        const stateResult = await pool.query(
-            'SELECT * FROM machine_state WHERE id=1'
-        );
+        const stateResult = await pool.query('SELECT * FROM machine_state WHERE id=1');
         if (stateResult.rows.length > 0) {
             machineStatus = stateResult.rows[0].status || 'UNKNOWN';
             lastData = stateResult.rows[0].last_data || lastData;
         }
-        const seqResult = await pool.query(
-            'SELECT current_seq FROM sequence_counter WHERE id=1'
-        );
+        const seqResult = await pool.query('SELECT current_seq FROM sequence_counter WHERE id=1');
         if (seqResult.rows.length > 0) {
             sequenceCounter = seqResult.rows[0].current_seq || 0;
         }
         dbAvailable = true;
-        console.log(
-            `✅ تحميل الحالة: status=${machineStatus}, seq=${sequenceCounter}`
-        );
+        console.log(`✅ تحميل الحالة: status=${machineStatus}, seq=${sequenceCounter}`);
     } catch (err) {
         console.error('⚠️ فشل تحميل الحالة:', err.message);
         dbAvailable = false;
     }
 }
 
+// ★ حساب Hash على السيرفر
+function computeHash(data) {
+    const str = JSON.stringify(data, Object.keys(data).sort());
+    return crypto.createHash('sha256').update(str, 'utf8').digest('hex');
+}
+
+// ★ رقم تسلسلي جديد
 async function getNextSeq() {
     sequenceCounter++;
     if (dbAvailable) {
         try {
-            await pool.query(
-                'UPDATE sequence_counter SET current_seq=$1 WHERE id=1',
-                [sequenceCounter]
-            );
+            await pool.query('UPDATE sequence_counter SET current_seq=$1 WHERE id=1', [sequenceCounter]);
         } catch (err) {
             console.error('⚠️ فشل تحديث SEQ:', err.message);
         }
@@ -359,34 +142,26 @@ async function getNextSeq() {
     return sequenceCounter;
 }
 
-// ═══════════════════════════════════════════════════════
-// ★★★ addToBuffer — إدخال مع حماية كاملة ★★★
-// ═══════════════════════════════════════════════════════
+// ★ إضافة رسالة — مع UUID + Hash
 async function addToBuffer(type, data, senderSocketId, clientUuid, clientHash) {
     const seq = await getNextSeq();
-    const uuid = clientUuid || generateUUID();
 
-    let serverHash;
-    try {
-        serverHash = computeHash(data);
-    } catch (e) {
-        serverHash = 'hash_error';
-    }
+    // إذا لم يُرسل UUID من العميل، أنشئ واحداً
+    const uuid = clientUuid || crypto.randomUUID();
 
+    // تحقق من Hash العميل
+    const serverHash = computeHash(data);
+    const hashToStore = clientHash || serverHash;
+
+    // تحقق من التطابق إذا أرسل العميل hash
     let hashValid = true;
     if (clientHash && clientHash !== serverHash) {
-        console.warn(
-            `⚠️ Hash mismatch! client=${clientHash.substring(0, 12)}… ` +
-            `server=${serverHash.substring(0, 12)}…`
-        );
+        console.warn(`⚠️ عدم تطابق Hash! client=${clientHash.substring(0,12)}... server=${serverHash.substring(0,12)}...`);
         hashValid = false;
     }
 
     const entry = {
-        seq,
-        uuid,
-        type,
-        data,
+        seq, uuid, type, data,
         hash: serverHash,
         hash_valid: hashValid,
         timestamp: new Date().toISOString(),
@@ -395,136 +170,50 @@ async function addToBuffer(type, data, senderSocketId, clientUuid, clientHash) {
     };
 
     if (dbAvailable) {
-        // ★ المحاولة 1: إدخال كامل مع كل الأعمدة
         try {
             await pool.query(
-                `INSERT INTO message_buffer
-                     (seq, uuid, type, data, hash, sender, timestamp, acked_by)
+                `INSERT INTO message_buffer (seq, uuid, type, data, hash, sender, timestamp, acked_by)
                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-                 ON CONFLICT (seq) DO NOTHING`,
-                [
-                    seq, uuid, type,
-                    JSON.stringify(data),
-                    serverHash, senderSocketId,
-                    entry.timestamp, []
-                ]
+                 ON CONFLICT (uuid) DO NOTHING`,
+                [seq, uuid, type, JSON.stringify(data), serverHash, senderSocketId, entry.timestamp, []]
             );
         } catch (err) {
-            console.error('⚠️ فشل INSERT (محاولة 1):', err.message);
-
-            // ★ المحاولة 2: إدخال بدون uuid ثم تحديثه
-            try {
-                await pool.query(
-                    `INSERT INTO message_buffer (seq, type, data)
-                     VALUES ($1,$2,$3)
-                     ON CONFLICT (seq) DO NOTHING`,
-                    [seq, type, JSON.stringify(data)]
-                );
-                // تحديث الحقول الإضافية واحداً واحداً
-                const updates = [
-                    ['uuid',      uuid],
-                    ['hash',      serverHash],
-                    ['sender',    senderSocketId],
-                    ['timestamp', entry.timestamp]
-                ];
-                for (const [col, val] of updates) {
-                    try {
-                        await pool.query(
-                            `UPDATE message_buffer
-                             SET ${col} = $1
-                             WHERE seq = $2 AND ${col} IS NULL`,
-                            [val, seq]
-                        );
-                    } catch (e2) {
-                        // العمود قد لا يكون موجوداً بعد — تجاهل
-                    }
-                }
-                console.log(`   ✅ INSERT بطريقة بديلة seq=${seq}`);
-            } catch (err2) {
-                console.error('⚠️ فشل INSERT (محاولة 2):', err2.message);
-            }
+            console.error('⚠️ فشل حفظ الرسالة:', err.message);
         }
     }
 
     return entry;
 }
 
-// ═══════════════════════════════════════════════════════
-// ★★★ getBufferAfterSeq — جلب مع Fallback ★★★
-// ═══════════════════════════════════════════════════════
+// ★ جلب رسائل بعد seq
 async function getBufferAfterSeq(afterSeq) {
     if (!dbAvailable) return [];
-
     try {
-        // ★ أولاً: اكتشف الأعمدة الموجودة فعلاً
-        const columns = await getAvailableColumns('message_buffer');
-
-        const selectCols = ['seq', 'type', 'data'];
-        if (columns.includes('uuid'))      selectCols.push('uuid');
-        if (columns.includes('hash'))      selectCols.push('hash');
-        if (columns.includes('sender'))    selectCols.push('sender');
-        if (columns.includes('timestamp')) selectCols.push('timestamp');
-        if (columns.includes('acked_by'))  selectCols.push('acked_by');
-
         const result = await pool.query(
-            `SELECT ${selectCols.join(', ')}
-             FROM message_buffer
-             WHERE seq > $1
-             ORDER BY seq ASC`,
+            `SELECT seq, uuid, type, data, hash, sender, timestamp, acked_by
+             FROM message_buffer WHERE seq > $1 ORDER BY seq ASC`,
             [afterSeq]
         );
-
-        return result.rows.map((row) => ({
-            seq:       row.seq,
-            uuid:      row.uuid || generateUUID(),
-            type:      row.type,
-            data:      typeof row.data === 'string' ? JSON.parse(row.data) : row.data,
-            hash:      row.hash || '',
-            sender:    row.sender || '',
-            timestamp: row.timestamp || new Date().toISOString(),
-            acked_by:  row.acked_by || []
+        return result.rows.map(row => ({
+            seq: row.seq,
+            uuid: row.uuid,
+            type: row.type,
+            data: typeof row.data === 'string' ? JSON.parse(row.data) : row.data,
+            hash: row.hash,
+            sender: row.sender,
+            timestamp: row.timestamp,
+            acked_by: row.acked_by || []
         }));
     } catch (err) {
         console.error('⚠️ فشل جلب الرسائل:', err.message);
-
-        // ★★★ Fallback: الأعمدة الأساسية فقط ★★★
-        try {
-            console.log('🔄 Fallback: جلب بالأعمدة الأساسية...');
-            const result = await pool.query(
-                `SELECT seq, type, data
-                 FROM message_buffer
-                 WHERE seq > $1
-                 ORDER BY seq ASC`,
-                [afterSeq]
-            );
-            return result.rows.map((row) => ({
-                seq:       row.seq,
-                uuid:      generateUUID(),
-                type:      row.type,
-                data:      typeof row.data === 'string' ? JSON.parse(row.data) : row.data,
-                hash:      '',
-                sender:    '',
-                timestamp: new Date().toISOString(),
-                acked_by:  []
-            }));
-        } catch (err2) {
-            console.error('❌ فشل الجلب نهائياً:', err2.message);
-            return [];
-        }
+        return [];
     }
 }
 
-// ═══════════════════════════════════════════════════════
-// ★★★ getMessageByUuid — بحث بالـ UUID ★★★
-// ═══════════════════════════════════════════════════════
+// ★ جلب رسالة بالـ UUID
 async function getMessageByUuid(uuid) {
-    if (!dbAvailable || !uuid) return null;
+    if (!dbAvailable) return null;
     try {
-        const columns = await getAvailableColumns('message_buffer');
-        if (!columns.includes('uuid')) {
-            console.warn('⚠️ عمود uuid غير موجود بعد');
-            return null;
-        }
         const result = await pool.query(
             'SELECT seq, uuid, type, data, hash FROM message_buffer WHERE uuid=$1',
             [uuid]
@@ -532,73 +221,53 @@ async function getMessageByUuid(uuid) {
         if (result.rows.length > 0) {
             const row = result.rows[0];
             return {
-                seq:  row.seq,
+                seq: row.seq,
                 uuid: row.uuid,
                 type: row.type,
                 data: typeof row.data === 'string' ? JSON.parse(row.data) : row.data,
-                hash: row.hash || ''
+                hash: row.hash
             };
         }
         return null;
     } catch (err) {
-        console.error(`⚠️ خطأ البحث بـ UUID: ${err.message}`);
         return null;
     }
 }
 
-// ═══════════════════════════════════════════════════════
-// ★★★ دوال مساعدة أخرى ★★★
-// ═══════════════════════════════════════════════════════
-
 async function getBufferCount() {
     if (!dbAvailable) return 0;
     try {
-        const r = await pool.query('SELECT COUNT(*) as count FROM message_buffer');
-        return parseInt(r.rows[0].count);
-    } catch (err) {
-        return 0;
-    }
+        const result = await pool.query('SELECT COUNT(*) as count FROM message_buffer');
+        return parseInt(result.rows[0].count);
+    } catch (err) { return 0; }
 }
 
 async function getBufferRange() {
     if (!dbAvailable) return { oldest: 0, newest: 0 };
     try {
-        const r = await pool.query(
-            'SELECT MIN(seq) as oldest, MAX(seq) as newest FROM message_buffer'
-        );
-        return {
-            oldest: r.rows[0].oldest || 0,
-            newest: r.rows[0].newest || 0
-        };
-    } catch (err) {
-        return { oldest: 0, newest: 0 };
-    }
+        const result = await pool.query('SELECT MIN(seq) as oldest, MAX(seq) as newest FROM message_buffer');
+        return { oldest: result.rows[0].oldest || 0, newest: result.rows[0].newest || 0 };
+    } catch (err) { return { oldest: 0, newest: 0 }; }
 }
 
 async function markAcked(seq, socketId) {
     if (!dbAvailable) return;
     try {
-        const columns = await getAvailableColumns('message_buffer');
-        if (columns.includes('acked_by')) {
-            await pool.query(
-                `UPDATE message_buffer
-                 SET acked_by = array_append(acked_by, $1)
-                 WHERE seq = $2 AND NOT ($1 = ANY(acked_by))`,
-                [socketId, seq]
-            );
-        }
-    } catch (err) {
-        /* تجاهل */
-    }
+        await pool.query(
+            `UPDATE message_buffer SET acked_by = array_append(acked_by, $1)
+             WHERE seq = $2 AND NOT ($1 = ANY(acked_by))`,
+            [socketId, seq]
+        );
+    } catch (err) { /* تجاهل */ }
 }
 
 async function updateMachineState(status, data) {
     machineStatus = status || machineStatus;
     if (data) {
-        if (data.tailor)     lastData.tailor   = data.tailor;
-        if (data.embroidery) lastData.color    = data.embroidery;
-        if (data.color)      lastData.color    = data.color;
-        if (data.ficha_id)   lastData.ficha_id = data.ficha_id;
+        if (data.tailor) lastData.tailor = data.tailor;
+        if (data.embroidery) lastData.color = data.embroidery;
+        if (data.color) lastData.color = data.color;
+        if (data.ficha_id) lastData.ficha_id = data.ficha_id;
     }
     if (dbAvailable) {
         try {
@@ -606,9 +275,7 @@ async function updateMachineState(status, data) {
                 'UPDATE machine_state SET status=$1, last_data=$2, updated_at=NOW() WHERE id=1',
                 [machineStatus, JSON.stringify(lastData)]
             );
-        } catch (err) {
-            /* تجاهل */
-        }
+        } catch (err) { /* تجاهل */ }
     }
 }
 
@@ -616,34 +283,16 @@ async function cleanOldMessages() {
     if (!dbAvailable) return;
     try {
         const result = await pool.query(
-            `DELETE FROM message_buffer
-             WHERE timestamp < NOW() - INTERVAL '15 days'`
+            `DELETE FROM message_buffer WHERE timestamp < NOW() - INTERVAL '7 days'`
         );
         if (result.rowCount > 0) {
             console.log(`🧹 تنظيف: حذف ${result.rowCount} رسالة قديمة`);
         }
-    } catch (err) {
-        // إذا عمود timestamp غير موجود — تنظيف بالـ SEQ
-        try {
-            const countRes = await pool.query(
-                'SELECT COUNT(*) as c FROM message_buffer'
-            );
-            const count = parseInt(countRes.rows[0].c);
-            if (count > 10000) {
-                await pool.query(
-                    `DELETE FROM message_buffer
-                     WHERE seq < (SELECT MAX(seq) - 5000 FROM message_buffer)`
-                );
-                console.log('🧹 تنظيف بالـ SEQ');
-            }
-        } catch (err2) {
-            /* تجاهل */
-        }
-    }
+    } catch (err) { /* تجاهل */ }
 }
 
 // ═══════════════════════════════════════════════════════
-// ★★★ API Endpoints ★★★
+// ★ API endpoints
 // ═══════════════════════════════════════════════════════
 app.use(express.json());
 
@@ -656,10 +305,8 @@ app.get('/health', async (req, res) => {
     const range = await getBufferRange();
     res.json({
         status: 'ok',
-        version: 'V5-UUID-AutoMigrate',
         clients: io.engine.clientsCount,
-        machineStatus,
-        lastData,
+        machineStatus, lastData,
         bufferSize: bufferCount,
         lastSeq: sequenceCounter,
         oldestSeq: range.oldest,
@@ -674,12 +321,9 @@ app.get('/api/sync', async (req, res) => {
     try {
         const messages = await getBufferAfterSeq(afterSeq);
         res.json({
-            status: 'ok',
-            last_seq: sequenceCounter,
-            count: messages.length,
-            messages,
-            machine_status: machineStatus,
-            last_data: lastData
+            status: 'ok', last_seq: sequenceCounter,
+            count: messages.length, messages,
+            machine_status: machineStatus, last_data: lastData
         });
     } catch (err) {
         res.status(500).json({ status: 'error', message: err.message });
@@ -689,20 +333,11 @@ app.get('/api/sync', async (req, res) => {
 app.get('/api/buffer/status', async (req, res) => {
     const bufferCount = await getBufferCount();
     const range = await getBufferRange();
-    let columns = [];
-    try {
-        columns = await getAvailableColumns('message_buffer');
-    } catch (e) {
-        /* تجاهل */
-    }
     res.json({
-        total_messages: bufferCount,
-        last_seq: sequenceCounter,
+        total_messages: bufferCount, last_seq: sequenceCounter,
         machine_status: machineStatus,
-        oldest_seq: range.oldest,
-        newest_seq: range.newest,
-        db_available: dbAvailable,
-        table_columns: columns
+        oldest_seq: range.oldest, newest_seq: range.newest,
+        db_available: dbAvailable
     });
 });
 
@@ -712,13 +347,11 @@ app.post('/api/ack', async (req, res) => {
         await markAcked(seq, client_id);
         res.json({ status: 'ok', seq });
     } else {
-        res.status(400).json({
-            status: 'error',
-            message: 'seq and client_id required'
-        });
+        res.status(400).json({ status: 'error', message: 'seq and client_id required' });
     }
 });
 
+// ★ API لإعادة إرسال رسالة بالـ UUID
 app.get('/api/resend/:uuid', async (req, res) => {
     const msg = await getMessageByUuid(req.params.uuid);
     if (msg) {
@@ -732,14 +365,22 @@ app.get('/api/messages', async (req, res) => {
     const afterSeq = parseInt(req.query.after_seq) || 0;
     const limit = Math.min(parseInt(req.query.limit) || 1000, 5000);
     try {
-        const messages = await getBufferAfterSeq(afterSeq);
-        const limited = messages.slice(0, limit);
-        res.json({
-            status: 'ok',
-            count: limited.length,
-            last_seq: sequenceCounter,
-            messages: limited
-        });
+        let messages;
+        if (dbAvailable) {
+            const result = await pool.query(
+                `SELECT seq, uuid, type, data, hash, sender, timestamp
+                 FROM message_buffer WHERE seq > $1 ORDER BY seq ASC LIMIT $2`,
+                [afterSeq, limit]
+            );
+            messages = result.rows.map(row => ({
+                seq: row.seq, uuid: row.uuid, type: row.type,
+                data: typeof row.data === 'string' ? JSON.parse(row.data) : row.data,
+                hash: row.hash, timestamp: row.timestamp
+            }));
+        } else {
+            messages = [];
+        }
+        res.json({ status: 'ok', count: messages.length, last_seq: sequenceCounter, messages });
     } catch (err) {
         res.status(500).json({ status: 'error', message: err.message });
     }
@@ -748,33 +389,20 @@ app.get('/api/messages', async (req, res) => {
 app.get('/api/stats', async (req, res) => {
     try {
         let stats = {
-            total_messages: 0,
-            messages_today: 0,
-            messages_by_type: {},
-            last_seq: sequenceCounter,
-            db_available: dbAvailable
+            total_messages: 0, messages_today: 0,
+            messages_by_type: {}, last_seq: sequenceCounter, db_available: dbAvailable
         };
         if (dbAvailable) {
-            const totalRes = await pool.query(
-                'SELECT COUNT(*) as count FROM message_buffer'
+            const totalResult = await pool.query('SELECT COUNT(*) as count FROM message_buffer');
+            stats.total_messages = parseInt(totalResult.rows[0].count);
+            const todayResult = await pool.query(
+                "SELECT COUNT(*) as count FROM message_buffer WHERE timestamp >= CURRENT_DATE"
             );
-            stats.total_messages = parseInt(totalRes.rows[0].count);
-
-            try {
-                const todayRes = await pool.query(
-                    "SELECT COUNT(*) as count FROM message_buffer WHERE timestamp >= CURRENT_DATE"
-                );
-                stats.messages_today = parseInt(todayRes.rows[0].count);
-            } catch (e) {
-                stats.messages_today = -1;
-            }
-
-            const typeRes = await pool.query(
+            stats.messages_today = parseInt(todayResult.rows[0].count);
+            const typeResult = await pool.query(
                 'SELECT type, COUNT(*) as count FROM message_buffer GROUP BY type ORDER BY count DESC'
             );
-            typeRes.rows.forEach((row) => {
-                stats.messages_by_type[row.type] = parseInt(row.count);
-            });
+            typeResult.rows.forEach(row => { stats.messages_by_type[row.type] = parseInt(row.count); });
         }
         res.json(stats);
     } catch (err) {
@@ -782,147 +410,82 @@ app.get('/api/stats', async (req, res) => {
     }
 });
 
-// ★ API تشخيصي
-app.get('/api/debug/schema', async (req, res) => {
-    try {
-        const result = await pool.query(`
-            SELECT column_name, data_type, is_nullable, column_default
-            FROM information_schema.columns
-            WHERE table_name = 'message_buffer'
-            ORDER BY ordinal_position
-        `);
-        res.json({
-            status: 'ok',
-            table: 'message_buffer',
-            columns: result.rows
-        });
-    } catch (err) {
-        res.status(500).json({ status: 'error', message: err.message });
-    }
-});
-
-// ★ API إعادة migration يدوي
-app.post('/api/admin/migrate', async (req, res) => {
-    try {
-        await initDatabase();
-        _cachedColumns = {};
-        res.json({ status: 'ok', message: 'Migration completed' });
-    } catch (err) {
-        res.status(500).json({ status: 'error', message: err.message });
-    }
-});
-
 // ═══════════════════════════════════════════════════════
-// ★★★ Socket.IO — أحداث الاتصال ★★★
+// ★★★ Socket.IO V9 — UUID + Hash + NACK ★★★
 // ═══════════════════════════════════════════════════════
 io.on('connection', async (socket) => {
-    console.log(
-        `✅ متصل: ${socket.id} | الإجمالي: ${io.engine.clientsCount}`
-    );
+    console.log(`✅ متصل: ${socket.id} | الإجمالي: ${io.engine.clientsCount}`);
 
     const bufferCount = await getBufferCount();
     socket.emit('welcome', {
-        status: machineStatus,
-        details: lastData,
-        last_seq: sequenceCounter,
-        buffer_size: bufferCount,
+        status: machineStatus, details: lastData,
+        last_seq: sequenceCounter, buffer_size: bufferCount,
         db_available: dbAvailable
     });
     socket.emit('machine_status', { status: machineStatus });
 
-    // ═══ مزامنة ═══
+    // ═══ طلب مزامنة ═══
     socket.on('sync_request', async (payload) => {
-        const afterSeq = (payload && payload.after_seq) || 0;
-        console.log(`🔄 [${socket.id}] sync after seq=${afterSeq}`);
+        const afterSeq = payload.after_seq || 0;
+        console.log(`🔄 [${socket.id}] مزامنة بعد seq=${afterSeq}`);
         try {
             const missed = await getBufferAfterSeq(afterSeq);
             console.log(`   📦 إرسال ${missed.length} رسالة`);
             socket.emit('sync_response', {
-                last_seq: sequenceCounter,
-                count: missed.length,
-                messages: missed,
-                machine_status: machineStatus,
-                last_data: lastData
+                last_seq: sequenceCounter, count: missed.length,
+                messages: missed, machine_status: machineStatus, last_data: lastData
             });
         } catch (err) {
             console.error('❌ خطأ مزامنة:', err.message);
             socket.emit('sync_response', {
-                last_seq: sequenceCounter,
-                count: 0,
-                messages: [],
-                machine_status: machineStatus,
-                error: err.message
+                last_seq: sequenceCounter, count: 0, messages: [],
+                machine_status: machineStatus, error: err.message
             });
         }
     });
 
-    // ═══ ACK ═══
+    // ═══ تأكيد استلام ═══
     socket.on('ack', async (payload) => {
-        if (!payload) return;
         const seq = payload.seq;
         if (seq) {
             await markAcked(seq, socket.id);
             if (dbAvailable) {
                 try {
-                    const columns = await getAvailableColumns('message_buffer');
-                    if (columns.includes('sender')) {
-                        const result = await pool.query(
-                            'SELECT sender FROM message_buffer WHERE seq=$1',
-                            [seq]
-                        );
-                        if (result.rows.length > 0 && result.rows[0].sender) {
-                            io.to(result.rows[0].sender).emit(
-                                'delivery_confirmed',
-                                {
-                                    seq,
-                                    acked_by: socket.id,
-                                    timestamp: new Date().toISOString()
-                                }
-                            );
-                        }
+                    const result = await pool.query(
+                        'SELECT sender FROM message_buffer WHERE seq=$1', [seq]
+                    );
+                    if (result.rows.length > 0 && result.rows[0].sender) {
+                        io.to(result.rows[0].sender).emit('delivery_confirmed', {
+                            seq, acked_by: socket.id, timestamp: new Date().toISOString()
+                        });
                     }
-                } catch (err) {
-                    /* تجاهل */
-                }
+                } catch (err) { /* تجاهل */ }
             }
         }
     });
 
     socket.on('ack_batch', async (payload) => {
-        if (!payload) return;
         const seqs = payload.seqs || [];
-        for (const seq of seqs) {
-            await markAcked(seq, socket.id);
-        }
+        for (const seq of seqs) { await markAcked(seq, socket.id); }
         console.log(`✅ [${socket.id}] ACK batch: ${seqs.length}`);
         if (dbAvailable) {
             try {
-                const columns = await getAvailableColumns('message_buffer');
-                if (columns.includes('sender')) {
-                    const result = await pool.query(
-                        'SELECT DISTINCT sender FROM message_buffer WHERE seq = ANY($1)',
-                        [seqs]
-                    );
-                    result.rows.forEach((row) => {
-                        if (row.sender) {
-                            seqs.forEach((seq) => {
-                                io.to(row.sender).emit('delivery_confirmed', {
-                                    seq,
-                                    acked_by: socket.id
-                                });
-                            });
-                        }
-                    });
-                }
-            } catch (err) {
-                /* تجاهل */
-            }
+                const result = await pool.query(
+                    'SELECT DISTINCT sender FROM message_buffer WHERE seq = ANY($1)', [seqs]
+                );
+                result.rows.forEach(row => {
+                    if (row.sender) {
+                        seqs.forEach(seq => {
+                            io.to(row.sender).emit('delivery_confirmed', { seq, acked_by: socket.id });
+                        });
+                    }
+                });
+            } catch (err) { /* تجاهل */ }
         }
     });
 
-    // ═══ NACK ═══
+    // ═══ طلب إعادة إرسال (NACK) ═══
     socket.on('nack_resend', async (payload) => {
-        if (!payload) return;
         const uuid = payload.uuid;
         const reason = payload.reason || 'unknown';
         console.log(`🔁 [${socket.id}] NACK uuid=${uuid} reason=${reason}`);
@@ -931,30 +494,23 @@ io.on('connection', async (socket) => {
             const msg = await getMessageByUuid(uuid);
             if (msg) {
                 socket.emit('resend_message', {
-                    seq: msg.seq,
-                    uuid: msg.uuid,
-                    type: msg.type,
-                    data: msg.data,
-                    hash: msg.hash,
+                    seq: msg.seq, uuid: msg.uuid, type: msg.type,
+                    data: msg.data, hash: msg.hash,
                     is_resend: true
                 });
-                console.log(`   ✅ resent uuid=${uuid}`);
+                console.log(`   ✅ أُعيد إرسال uuid=${uuid}`);
             } else {
                 socket.emit('resend_failed', { uuid, reason: 'not_found' });
-                console.log(`   ❌ uuid=${uuid} not found`);
+                console.log(`   ❌ uuid=${uuid} غير موجود`);
             }
         }
     });
 
-    // ═══════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════
     // ★★★ أوامر الآلة ★★★
-    // ═══════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════
     socket.on('command', async (payload) => {
-        if (!payload) return;
-        console.log(
-            `📨 [${socket.id}] command:`,
-            JSON.stringify(payload).substring(0, 200)
-        );
+        console.log(`📨 [${socket.id}] command:`, JSON.stringify(payload).substring(0, 200));
 
         const action = payload.action;
         const data = payload.data || payload.details || {};
@@ -964,39 +520,24 @@ io.on('connection', async (socket) => {
         if (['START', 'STOP', 'PAUSE'].includes(action)) {
             await updateMachineState(action, data);
 
-            const entry = await addToBuffer(
-                'machine_command',
-                {
-                    action,
-                    speed: data.speed || null,
-                    timestamp: payload.timestamp
-                },
-                socket.id,
-                clientUuid,
-                clientHash
-            );
+            const entry = await addToBuffer('machine_command', {
+                action, speed: data.speed || null, timestamp: payload.timestamp
+            }, socket.id, clientUuid, clientHash);
 
             socket.broadcast.emit('machine_status', {
-                status: action,
-                speed: data.speed || null,
+                status: action, speed: data.speed || null,
                 timestamp: payload.timestamp,
-                seq: entry.seq,
-                uuid: entry.uuid,
-                hash: entry.hash
+                seq: entry.seq, uuid: entry.uuid, hash: entry.hash
             });
 
             io.emit('update_ui', {
-                status: machineStatus,
-                details: lastData,
-                seq: entry.seq,
-                uuid: entry.uuid
+                status: machineStatus, details: lastData,
+                seq: entry.seq, uuid: entry.uuid
             });
 
             socket.emit('server_ack', {
-                seq: entry.seq,
-                uuid: entry.uuid,
-                original_action: action,
-                status: 'stored_in_db',
+                seq: entry.seq, uuid: entry.uuid,
+                original_action: action, status: 'stored_in_db',
                 hash_valid: entry.hash_valid
             });
         }
@@ -1006,135 +547,90 @@ io.on('connection', async (socket) => {
             const details = payload.details || {};
             await updateMachineState(null, details);
 
-            const entry = await addToBuffer(
-                changeType,
-                details,
-                socket.id,
-                clientUuid,
-                clientHash
-            );
+            const entry = await addToBuffer(changeType, details, socket.id, clientUuid, clientHash);
 
             socket.broadcast.emit('data_changed', {
-                type: changeType,
-                change_type: changeType,
-                details,
-                timestamp: payload.timestamp,
-                seq: entry.seq,
-                uuid: entry.uuid,
-                hash: entry.hash
+                type: changeType, change_type: changeType,
+                details, timestamp: payload.timestamp,
+                seq: entry.seq, uuid: entry.uuid, hash: entry.hash
             });
 
             io.emit('update_ui', {
-                status: machineStatus,
-                details: lastData,
-                seq: entry.seq,
-                uuid: entry.uuid
+                status: machineStatus, details: lastData,
+                seq: entry.seq, uuid: entry.uuid
             });
 
             socket.emit('server_ack', {
-                seq: entry.seq,
-                uuid: entry.uuid,
-                original_action: changeType,
-                status: 'stored_in_db',
+                seq: entry.seq, uuid: entry.uuid,
+                original_action: changeType, status: 'stored_in_db',
                 hash_valid: entry.hash_valid
             });
         }
 
         if (action === 'SYNC_REQUEST') {
-            const afterSeq = (data && data.after_seq) || 0;
+            const afterSeq = data.after_seq || 0;
             const missed = await getBufferAfterSeq(afterSeq);
             socket.emit('sync_response', {
-                last_seq: sequenceCounter,
-                count: missed.length,
-                messages: missed,
-                machine_status: machineStatus,
-                last_data: lastData
+                last_seq: sequenceCounter, count: missed.length,
+                messages: missed, machine_status: machineStatus, last_data: lastData
             });
         }
     });
 
-    // ═══════════════════════════════════════════════════
-    // ★★★ أحداث مباشرة — handleDirectEvent ★★★
-    // ═══════════════════════════════════════════════════
-    async function handleDirectEvent(eventName, data, socket) {
-        if (!data || typeof data !== 'object') {
-            console.warn(`⚠️ [${eventName}] بيانات غير صالحة`);
-            return;
-        }
+    // ═══════════════════════════════════════════════════════
+    // ★★★ أحداث مباشرة — V9 مع UUID + Hash ★★★
+    // ═══════════════════════════════════════════════════════
 
+    // دالة مساعدة لمعالجة الأحداث المباشرة
+    async function handleDirectEvent(eventName, data, socket) {
         const clientUuid = data.uuid || data._uuid;
         const clientHash = data.hash || data._hash;
 
-        // تحقق من التكرار بالـ UUID
+        // تحقق من عدم التكرار بالـ UUID
         if (clientUuid && dbAvailable) {
             try {
-                const columns = await getAvailableColumns('message_buffer');
-                if (columns.includes('uuid')) {
-                    const existing = await pool.query(
-                        'SELECT seq FROM message_buffer WHERE uuid=$1',
-                        [clientUuid]
-                    );
-                    if (existing.rows.length > 0) {
-                        console.log(
-                            `   🔄 UUID مكرر: ${clientUuid.substring(0, 8)}…`
-                        );
-                        socket.emit('server_ack', {
-                            seq: existing.rows[0].seq,
-                            uuid: clientUuid,
-                            original_action: eventName,
-                            status: 'already_exists'
-                        });
-                        return;
-                    }
+                const existing = await pool.query(
+                    'SELECT seq FROM message_buffer WHERE uuid=$1', [clientUuid]
+                );
+                if (existing.rows.length > 0) {
+                    console.log(`   🔄 UUID مكرر: ${clientUuid} — تجاهل`);
+                    socket.emit('server_ack', {
+                        seq: existing.rows[0].seq, uuid: clientUuid,
+                        original_action: eventName, status: 'already_exists'
+                    });
+                    return;
                 }
-            } catch (err) {
-                /* واصل */
-            }
+            } catch (err) { /* واصل */ }
         }
 
-        // تنظيف البيانات
+        // احذف الحقول الخاصة من البيانات قبل التخزين
         const cleanData = { ...data };
         delete cleanData._uuid;
         delete cleanData._hash;
         delete cleanData.uuid;
         delete cleanData.hash;
 
-        const entry = await addToBuffer(
-            eventName,
-            cleanData,
-            socket.id,
-            clientUuid,
-            clientHash
-        );
+        const entry = await addToBuffer(eventName, cleanData, socket.id, clientUuid, clientHash);
         await updateMachineState(null, cleanData);
 
-        // بث
+        // أضف UUID و Hash للبث
         const broadcastData = {
             ...cleanData,
-            seq: entry.seq,
-            uuid: entry.uuid,
-            hash: entry.hash
+            seq: entry.seq, uuid: entry.uuid, hash: entry.hash
         };
+
         socket.broadcast.emit(eventName, broadcastData);
-
         io.emit('update_ui', {
-            status: machineStatus,
-            details: lastData,
-            seq: entry.seq,
-            uuid: entry.uuid
+            status: machineStatus, details: lastData,
+            seq: entry.seq, uuid: entry.uuid
         });
-
         socket.emit('server_ack', {
-            seq: entry.seq,
-            uuid: entry.uuid,
-            original_action: eventName,
-            status: 'stored_in_db',
+            seq: entry.seq, uuid: entry.uuid,
+            original_action: eventName, status: 'stored_in_db',
             hash_valid: entry.hash_valid
         });
 
-        console.log(
-            `   📡 ${eventName} [seq=${entry.seq}, uuid=${(entry.uuid || '').substring(0, 8)}…] ✅`
-        );
+        console.log(`   📡 ${eventName} [seq=${entry.seq}, uuid=${entry.uuid.substring(0,8)}...] ✅`);
     }
 
     socket.on('ficha_saved', async (data) => {
@@ -1159,19 +655,12 @@ io.on('connection', async (socket) => {
 
     socket.on('machine_status', async (data) => {
         console.log(`⚙️ [${socket.id}] machine_status`);
-        if (data && data.status) await updateMachineState(data.status, null);
+        if (data.status) await updateMachineState(data.status, null);
         await handleDirectEvent('machine_status', data, socket);
     });
 
     socket.on('speed_update', async (data) => {
-        if (!data) return;
-        const entry = await addToBuffer(
-            'speed_update',
-            data,
-            socket.id,
-            data.uuid,
-            data.hash
-        );
+        const entry = await addToBuffer('speed_update', data, socket.id, data.uuid, data.hash);
         data.seq = entry.seq;
         data.uuid = entry.uuid;
         data.hash = entry.hash;
@@ -1194,9 +683,7 @@ io.on('connection', async (socket) => {
     });
 
     socket.on('disconnect', () => {
-        console.log(
-            `❌ انقطع: ${socket.id} | المتبقي: ${io.engine.clientsCount}`
-        );
+        console.log(`❌ انقطع: ${socket.id} | المتبقي: ${io.engine.clientsCount}`);
     });
 });
 
@@ -1213,23 +700,17 @@ async function startServer() {
     await loadStateFromDB();
     await cleanOldMessages();
 
-    // مسح cache الأعمدة بعد الـ migration
-    _cachedColumns = {};
-
     server.listen(PORT, () => {
         console.log('═'.repeat(65));
-        console.log(`🚀 السيرفر V5-UUID-AutoMigrate جاهز — المنفذ ${PORT}`);
+        console.log(`🚀 السيرفر V9 جاهز على المنفذ ${PORT}`);
         console.log(`💾 PostgreSQL: ${dbAvailable ? '✅' : '❌'}`);
         console.log(`🔐 UUID + SHA-256 Hash لكل رسالة`);
-        console.log(`🔁 NACK/Resend مدعوم`);
-        console.log(`🔧 Auto-Migration: أعمدة مفقودة تُضاف تلقائياً`);
-        console.log(`📊 تشخيص: /api/debug/schema`);
-        console.log(`🔄 migration يدوي: POST /api/admin/migrate`);
+        console.log(`🔁 دعم NACK/Resend`);
         console.log('═'.repeat(65));
     });
 }
 
-startServer().catch((err) => {
+startServer().catch(err => {
     console.error('❌ فشل البدء:', err);
     process.exit(1);
 });
